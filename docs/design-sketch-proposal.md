@@ -16,17 +16,37 @@ Events lets an MCP client subscribe to things happening in an upstream system �
 
 ## Capability Declaration
 
-Servers advertise event support in their capabilities:
+Events is an MCP extension, identified as `io.modelcontextprotocol/events`, and is declared through [Extension Negotiation](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle#extension-negotiation): the identifier appears as a key in the `extensions` field of capabilities, mapped to the extension's settings object. It is not a top-level capability like `tools` or `resources` — those are reserved for the core protocol, and the `extensions` map is where an opt-in feature lives alongside Apps (`io.modelcontextprotocol/ui`) and Tasks (`io.modelcontextprotocol/tasks`).
+
+A server advertises event support as:
 
 ```jsonc
 {
   "capabilities": {
-    "events": {
-      "listChanged": true
+    "extensions": {
+      "io.modelcontextprotocol/events": {
+        "listChanged": true
+      }
     }
   }
 }
 ```
+
+The server's settings object has one member: `listChanged` (boolean, optional, default `false`) — whether the server sends `notifications/events/list_changed` (see *Dynamic Event Types*). An empty settings object declares event support with no list-change notifications.
+
+A client MAY advertise the same identifier with an empty settings object to indicate that it understands the extension:
+
+```jsonc
+{
+  "capabilities": {
+    "extensions": {
+      "io.modelcontextprotocol/events": {}
+    }
+  }
+}
+```
+
+**Fallback.** All `events/*` requests are client-initiated, so a client MUST NOT send them to a server that has not advertised the extension, and a server that does not offer it answers any `events/*` request with `-32601 MethodNotFound` (standard JSON-RPC). The only unsolicited server-to-client message this extension defines is `notifications/events/list_changed`; a client that does not implement the extension ignores it as it would any unrecognized notification. Neither party needs to change its core-protocol behavior when the other does not support Events.
 
 ## Listing Available Events
 
@@ -94,7 +114,7 @@ Servers advertise event support in their capabilities:
 
 ### Dynamic Event Types: `notifications/events/list_changed`
 
-If the set of available event types, or the descriptor of any of them (`description`, `delivery`, `inputSchema`, `payloadSchema`), changes at runtime (e.g., a plugin is loaded, a data source is connected, a schema gains a field), the server sends a `notifications/events/list_changed` notification. The client SHOULD re-call `events/list` to refresh its event type registry. This is consistent with `notifications/tools/list_changed` and `notifications/resources/list_changed`.
+If the set of available event types, or the descriptor of any of them (`description`, `delivery`, `inputSchema`, `payloadSchema`), changes at runtime (e.g., a plugin is loaded, a data source is connected, a schema gains a field), the server sends a `notifications/events/list_changed` notification. The client SHOULD re-call `events/list` to refresh its event type registry. This is consistent with `notifications/tools/list_changed` and `notifications/resources/list_changed`, and like them it is sent only by a server that declared `listChanged: true` in its extension settings (see *Capability Declaration*).
 
 ### Event Type Removal and Breaking Changes
 
@@ -949,6 +969,7 @@ These are the choices where reasonable alternatives existed; recorded so reviewe
 | Decision | Choice | Rationale |
 |---|---|---|
 | Number of delivery modes | Three — poll, push, webhook | This goes against MCP's usual stance of offering one way to do a thing, and the cost is real: roughly 3× spec and SDK surface, two cursor placements, two subscription lifecycles. We pay it because the deployment topologies events must reach are disjoint, and dropping any mode strands a real population. **Poll** is the floor: it works for stateless/serverless servers with no outbound HTTP and no long-lived connections, and for clients behind NAT with no public endpoint — but at interval-bounded latency. **Push** gets low latency for stdio servers, local agents, and HTTP clients that can hold a stream open — but a server must keep a connection per subscription, which scale-to-zero and connection-capped deployments cannot. **Webhook** gets low latency without a held connection — but requires the server to make outbound HTTP and the client (or a proxy acting for it) to expose a reachable endpoint. No mode subsumes another: a serverless server can't push, a NAT'd client can't receive webhooks, a battery- or cost-sensitive client shouldn't poll. The alternative — define one mode and let proxies synthesize the rest — was rejected because it forces an always-on, trusted intermediary (holding cursors and webhook secrets) into every deployment that doesn't fit the chosen mode, which is most of them. May revisit if real deployments converge on a subset. |
+| Capability declaration | Under `capabilities.extensions["io.modelcontextprotocol/events"]`, not a top-level `events` capability | Events is an opt-in extension, and the base protocol's Extension Negotiation exists precisely so extensions do not each mint a top-level capability. Declaring it the same way as Apps and Tasks lets a generic client discover every extension a server offers with one lookup, and keeps the top-level capability namespace to the core protocol. An earlier draft showed a top-level `events` capability; implementations (e.g. the D SDK) already declare it in the `extensions` map. |
 | Mandatory delivery mode | None — servers advertise any non-empty subset of poll/push/webhook | Universal compatibility would be nice, but mandating any single mode places an unacceptable burden on implementers (poll needs a history or buffer; push needs a held connection; webhook needs outbound HTTP + SSRF hardening). The extension is already opt-in. May revisit if deployments converge on a common subset in practice. |
 | Webhook signature scheme | Adopt Standard Webhooks as a profile (`webhook-id`/`-timestamp`/`-signature`, `v1,` HMAC, `whsec_` secrets, multi-sig rotation) | Gets off-the-shelf verifier libraries in most languages and a defined asymmetric (`v1a,`) path for free. Trade-off is a dependency on an external community spec, but it's small, stable, pinnable, and not a one-way door. |
 | Batched poll/stream | One subscription per `events/poll`/`events/stream` request | Batching is a transport-level concern; HTTP/2 multiplexing makes per-subscription requests cheap. Avoids the protocol complexity batching introduces (coalescing heterogeneous `nextPollMs`, partial-failure result shapes, per-entry error routing, duplicate-id handling). Clients with many subscriptions on HTTP/1.1 should expect to coalesce at the transport, not the protocol. |
